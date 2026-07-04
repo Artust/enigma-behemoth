@@ -9,13 +9,14 @@ import (
 	"time"
 )
 
-// WriterConfig tunes the group-commit durable writer.
+// WriterConfig tunes the group-commit durable writer. A batch flushes at MaxBatch
+// events or MaxWait.
 type WriterConfig struct {
-	QueueSize   int           // bounded intake capacity; full => ErrQueueFull
-	MaxBatch    int           // flush after this many events
-	MaxWait     time.Duration // ...or after this long, whichever first
-	TxTimeout   time.Duration // per-batch DB transaction timeout
-	Concurrency int           // number of parallel committer goroutines (sharded group-commit)
+	QueueSize   int
+	MaxBatch    int
+	MaxWait     time.Duration
+	TxTimeout   time.Duration
+	Concurrency int
 }
 
 type writeReq struct {
@@ -23,10 +24,9 @@ type writeReq struct {
 	done chan error
 }
 
-// Writer batches DamageEvents from many concurrent handlers into single
-// Postgres transactions. Each handler blocks on Submit until the batch
-// containing its event is durably committed — giving true durability while
-// amortizing fsync cost across the batch to keep p99 low.
+// Writer batches DamageEvents from many concurrent handlers into single Postgres
+// transactions, amortizing fsync cost across the batch. Submit blocks until the
+// batch is durably committed.
 type Writer struct {
 	pg  *PostgresStore
 	cfg WriterConfig
@@ -50,19 +50,17 @@ func NewWriter(pg *PostgresStore, cfg WriterConfig, log *slog.Logger) *Writer {
 	}
 }
 
-// Start launches N batching goroutines that each independently group-commit
-// from the shared intake. Parallel committers overlap fsync latency across
-// separate connections, raising durable write throughput and cutting queue wait.
+// Start launches N goroutines that each group-commit from the shared intake,
+// overlapping fsync latency across separate connections.
 func (w *Writer) Start() {
-	for i := 0; i < w.cfg.Concurrency; i++ {
+	for range w.cfg.Concurrency {
 		w.wg.Add(1)
 		go w.loop()
 	}
 }
 
-// Submit enqueues an event and blocks until it is durably committed. It returns
-// ErrQueueFull immediately if the bounded intake is saturated (fail fast), or
-// the request context's error if the caller gives up waiting.
+// Submit enqueues an event and blocks until it is durably committed. Returns
+// ErrQueueFull if the intake is saturated, or the ctx error if the caller gives up.
 func (w *Writer) Submit(ctx context.Context, ev DamageEvent) error {
 	req := writeReq{ev: ev, done: make(chan error, 1)}
 	select {
@@ -78,8 +76,7 @@ func (w *Writer) Submit(ctx context.Context, ev DamageEvent) error {
 	}
 }
 
-// Stop closes the intake and waits for all buffered events to be flushed and
-// their waiters acked. Safe to call once.
+// Stop closes the intake and waits for buffered events to flush. Safe to call once.
 func (w *Writer) Stop() {
 	w.closeOne.Do(func() { close(w.ch) })
 	w.wg.Wait()
@@ -109,7 +106,7 @@ func (w *Writer) loop() {
 		select {
 		case req, ok := <-w.ch:
 			if !ok {
-				flush() // drain on shutdown
+				flush()
 				return
 			}
 			batch = append(batch, req)
@@ -126,9 +123,8 @@ func (w *Writer) loop() {
 	}
 }
 
-// commit persists one batch and releases every waiter with the outcome. A
-// panic or DB error never leaves a handler hung: the deferred release always
-// runs and every done channel receives the (possibly error) result.
+// commit persists one batch and releases every waiter with the outcome. The
+// deferred release always runs, so a panic or DB error never leaves a waiter hung.
 func (w *Writer) commit(batch []writeReq) {
 	var err error
 	defer func() {
@@ -136,8 +132,13 @@ func (w *Writer) commit(batch []writeReq) {
 			err = fmt.Errorf("writer panic: %v", r)
 			w.log.Error("group-commit panic recovered", "panic", r)
 		}
+		// Tag with ErrCommitFailed: a real commit failure (safe to undo Redis),
+		// distinct from a ctx cancel that may still commit.
+		if err != nil {
+			err = fmt.Errorf("%w: %w", ErrCommitFailed, err)
+		}
 		for _, req := range batch {
-			req.done <- err // done is buffered (cap 1) => never blocks
+			req.done <- err
 		}
 	}()
 
@@ -154,7 +155,6 @@ func (w *Writer) commit(batch []writeReq) {
 	}
 }
 
-// decodePayload turns stored JSONB bytes into a map for the API response.
 func decodePayload(b []byte) map[string]any {
 	if len(b) == 0 {
 		return nil

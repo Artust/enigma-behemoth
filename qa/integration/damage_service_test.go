@@ -14,24 +14,12 @@ import (
 	"behemoth/internal/store"
 )
 
-// buildDamageService wires the full damage path (Redis + durable writer +
-// rehydrator) exactly as main.go does, so these tests exercise the real
-// cross-store flow, not isolated layers.
+// buildDamageService wires the full damage path (Redis + writer + rehydrator) as main.go does.
 func buildDamageService(t *testing.T) (*boss.Service, *store.RedisStore, *store.PostgresStore) {
 	t.Helper()
-	ctx := context.Background()
 
-	pg, err := store.NewPostgresStore(ctx, pgDSN, pgMaxConns)
-	if err != nil {
-		t.Fatalf("postgres store: %v", err)
-	}
-	t.Cleanup(pg.Close)
-
-	rdb, err := store.NewRedisStore(ctx, redisAddr, "")
-	if err != nil {
-		t.Fatalf("redis store: %v", err)
-	}
-	t.Cleanup(func() { _ = rdb.Close() })
+	pg := openPG(t)
+	rdb := openRedis(t)
 
 	w := store.NewWriter(pg, store.WriterConfig{
 		QueueSize: 5000, MaxBatch: 200, MaxWait: 5 * time.Millisecond,
@@ -45,13 +33,8 @@ func buildDamageService(t *testing.T) (*boss.Service, *store.RedisStore, *store.
 	return svc, rdb, pg
 }
 
-// TestDamageService_RedisPostgresConsistency is the headline cross-store
-// atomicity check: after many concurrent /damage calls (each of which only
-// returns once its hit is DURABLY committed), the live Redis HP must equal the
-// HP derived from Postgres contributions, and both must equal maxHP minus the
-// total applied. A drift between the cache and the source of truth here would
-// mean a restart silently changes the boss's HP — violating the durability
-// requirement.
+// TestDamageService_RedisPostgresConsistency: after many concurrent durable
+// /damage calls, live Redis HP == Postgres-derived HP == maxHP-applied (no drift).
 func TestDamageService_RedisPostgresConsistency(t *testing.T) {
 	requireEnv(t)
 	ctx := context.Background()
@@ -63,7 +46,7 @@ func TestDamageService_RedisPostgresConsistency(t *testing.T) {
 	seedBoss(t, pool, bossID, maxHP, "alive")
 	t.Cleanup(func() { delRedisBoss(t, bossID) })
 
-	// Load the boss into Redis the way startup rehydrate would.
+	// Load the boss into Redis as startup rehydrate would.
 	reh := recovery.New(rdb, pg, testLogger())
 	if ok, err := reh.RehydrateBoss(ctx, bossID); err != nil || !ok {
 		t.Fatalf("initial rehydrate: ok=%v err=%v", ok, err)
@@ -108,7 +91,7 @@ func TestDamageService_RedisPostgresConsistency(t *testing.T) {
 		t.Fatalf("Redis HP = %d, want %d (maxHP-applied)", view.HP, wantHP)
 	}
 
-	// Postgres-derived HP (source of truth, what a restart would rehydrate to).
+	// Postgres-derived HP (source of truth).
 	rs, ok, err := pg.RecoveryState(ctx, bossID)
 	if err != nil || !ok {
 		t.Fatalf("recovery state: ok=%v err=%v", ok, err)
@@ -120,7 +103,7 @@ func TestDamageService_RedisPostgresConsistency(t *testing.T) {
 		t.Fatalf("cross-store drift: Redis HP=%d != Postgres-derived HP=%d", view.HP, rs.CurrentHP)
 	}
 
-	// The durable audit log must account for every applied hit.
+	// Audit log must account for every applied hit.
 	var events, total int64
 	if err := pool.QueryRow(ctx,
 		`SELECT COUNT(*), COALESCE(SUM(damage_applied),0) FROM damage_events WHERE boss_id = $1`,
@@ -135,10 +118,8 @@ func TestDamageService_RedisPostgresConsistency(t *testing.T) {
 	}
 }
 
-// TestDamageService_LazyRehydrateOnColdCache proves the "Redis lost mid-flight"
-// recovery branch: if the boss's cache keys vanish, a /damage still succeeds by
-// rehydrating from Postgres and retrying (never a spurious 404), and the applied
-// hit lands on the correctly-derived HP rather than a fresh full-HP boss.
+// TestDamageService_LazyRehydrateOnColdCache: with cache keys gone, /damage still
+// succeeds by rehydrating from Postgres, hitting derived HP not a full-HP boss.
 func TestDamageService_LazyRehydrateOnColdCache(t *testing.T) {
 	requireEnv(t)
 	ctx := context.Background()
@@ -157,13 +138,12 @@ func TestDamageService_LazyRehydrateOnColdCache(t *testing.T) {
 		t.Fatalf("seed prior damage: %v", err)
 	}
 
-	// Cache is COLD (never rehydrated / evicted). A damage must still work.
+	// Cold cache: damage must still work.
 	res, err := svc.Damage(ctx, bossID, "latecomer", 100)
 	if err != nil {
 		t.Fatalf("damage on cold cache: %v", err)
 	}
-	// Derived HP was 1000-400=600; after a 100 hit it must be 500 — proving the
-	// hit applied to the rehydrated HP, not to a mistaken full 1000.
+	// Derived HP 1000-400=600; after a 100 hit must be 500.
 	if res.BossHP != 500 {
 		t.Fatalf("HP after lazy-rehydrate hit = %d, want 500 (600 derived - 100)", res.BossHP)
 	}
@@ -171,7 +151,7 @@ func TestDamageService_LazyRehydrateOnColdCache(t *testing.T) {
 		t.Fatalf("applied = %d, want 100", res.Applied)
 	}
 
-	// And it is durable: derived HP now 1000-400-100 = 500.
+	// Durable: derived HP now 1000-400-100 = 500.
 	rs, ok, err := pg.RecoveryState(ctx, bossID)
 	if err != nil || !ok {
 		t.Fatalf("recovery state: ok=%v err=%v", ok, err)

@@ -2,11 +2,8 @@ package boss
 
 import "testing"
 
-// TestRewardIsMonotonicByTier encodes the requirement that "reward tier depends
-// on the % of damage contributed" — a strictly better contribution must yield a
-// strictly better reward. We assert gold is strictly decreasing from legendary
-// down to common. This checks the requirement-level ordering, not the exact
-// (arbitrary) gold numbers.
+// TestRewardIsMonotonicByTier: gold strictly decreases from legendary to common,
+// so a better contribution always yields a better reward (ordering, not values).
 func TestRewardIsMonotonicByTier(t *testing.T) {
 	order := []string{TierLegendary, TierEpic, TierRare, TierUncommon, TierCommon}
 	prev := int(^uint(0) >> 1) // max int
@@ -25,10 +22,7 @@ func TestRewardIsMonotonicByTier(t *testing.T) {
 	}
 }
 
-// TestTierForIsMonotonic asserts the tier rank never decreases as contribution
-// grows: a higher percentage can only ever earn an equal-or-better tier. This
-// guards against a mis-ordered threshold in TierFor independent of the exact
-// boundary table.
+// TestTierForIsMonotonic: tier rank never decreases as contribution grows.
 func TestTierForIsMonotonic(t *testing.T) {
 	rank := map[string]int{
 		TierCommon: 0, TierUncommon: 1, TierRare: 2, TierEpic: 3, TierLegendary: 4,
@@ -61,6 +55,26 @@ func TestTierFor(t *testing.T) {
 		{1, TierUncommon},
 		{0.999, TierCommon},
 		{0, TierCommon},
+	}
+	for _, c := range cases {
+		if got := TierFor(c.pct); got != c.want {
+			t.Errorf("TierFor(%v) = %q, want %q", c.pct, got, c.want)
+		}
+	}
+}
+
+// TestTierForOutOfRange guards the domain ends: <1% (incl. 0 and negative) is
+// Common, >=100 (incl. rounding past a full clear) stays Legendary.
+func TestTierForOutOfRange(t *testing.T) {
+	cases := []struct {
+		pct  float64
+		want string
+	}{
+		{-0.0001, TierCommon},
+		{-100, TierCommon},
+		{0.5, TierCommon},
+		{100.0001, TierLegendary},
+		{1000, TierLegendary},
 	}
 	for _, c := range cases {
 		if got := TierFor(c.pct); got != c.want {

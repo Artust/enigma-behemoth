@@ -1,5 +1,5 @@
-// Package recovery rebuilds the Redis hot-path cache from the durable Postgres
-// state — on startup (all bosses) and lazily on a cache miss (one boss).
+// Package recovery rebuilds the Redis hot-path cache from durable Postgres state:
+// on startup (all bosses) and lazily on a cache miss (one boss).
 package recovery
 
 import (
@@ -16,13 +16,12 @@ type Rehydrator struct {
 	log   *slog.Logger
 }
 
-// New builds a Rehydrator.
 func New(r *store.RedisStore, pg *store.PostgresStore, log *slog.Logger) *Rehydrator {
 	return &Rehydrator{redis: r, pg: pg, log: log}
 }
 
 // RehydrateBoss loads one boss's durable state into Redis. The bool is false
-// when the boss does not exist in Postgres (caller maps to 404).
+// when the boss does not exist in Postgres.
 func (h *Rehydrator) RehydrateBoss(ctx context.Context, bossID string) (bool, error) {
 	rs, ok, err := h.pg.RecoveryState(ctx, bossID)
 	if err != nil || !ok {
@@ -38,8 +37,8 @@ func (h *Rehydrator) RehydrateBoss(ctx context.Context, bossID string) (bool, er
 	return true, nil
 }
 
-// RehydrateAll rebuilds the cache for every known boss. Called before the
-// service reports ready, so no request ever hits an empty Redis.
+// RehydrateAll rebuilds the cache for every known boss, run before the service
+// reports ready.
 func (h *Rehydrator) RehydrateAll(ctx context.Context) error {
 	ids, err := h.pg.ListBossIDs(ctx)
 	if err != nil {

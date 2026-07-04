@@ -9,9 +9,7 @@ import (
 	"behemoth/internal/store"
 )
 
-// TestClaim_ExactlyOnceUnderRace fires many concurrent identical claims and
-// asserts the DB constraint makes it exactly-once: precisely one insert wins,
-// every other request gets the same idempotent reward with AlreadyClaimed=true.
+// TestClaim_ExactlyOnceUnderRace: concurrent identical claims yield one insert, rest idempotent.
 func TestClaim_ExactlyOnceUnderRace(t *testing.T) {
 	requireEnv(t)
 	ctx := context.Background()
@@ -43,7 +41,7 @@ func TestClaim_ExactlyOnceUnderRace(t *testing.T) {
 	done := make(chan int, racers)
 	for i := 0; i < racers; i++ {
 		go func(i int) {
-			<-start // release all at once to maximize contention
+			<-start // release all at once
 			results[i], errs[i] = pg.SaveClaim(ctx, in)
 			done <- i
 		}(i)
@@ -80,8 +78,7 @@ func TestClaim_ExactlyOnceUnderRace(t *testing.T) {
 	}
 }
 
-// TestClaimBasis_Gating checks the durable authorization gates used by the
-// service before a claim is priced.
+// TestClaimBasis_Gating: durable authorization gates checked before pricing a claim.
 func TestClaimBasis_Gating(t *testing.T) {
 	requireEnv(t)
 	ctx := context.Background()

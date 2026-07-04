@@ -7,8 +7,8 @@ import (
 	"net/http"
 	"sync/atomic"
 
-	"github.com/go-chi/chi/v5"
 	"behemoth/internal/boss"
+	"github.com/go-chi/chi/v5"
 )
 
 // Server holds handler dependencies.
@@ -19,7 +19,6 @@ type Server struct {
 	metrics *Metrics
 }
 
-// NewServer builds the HTTP server dependencies.
 func NewServer(svc *boss.Service, ready *atomic.Bool, log *slog.Logger, m *Metrics) *Server {
 	return &Server{svc: svc, ready: ready, log: log, metrics: m}
 }
@@ -37,7 +36,7 @@ type claimRequest struct {
 
 func (s *Server) handleDamage(w http.ResponseWriter, r *http.Request) {
 	var req damageRequest
-	if err := decodeJSON(w, r, &req); err != nil {
+	if err := decodeJSON(r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid JSON body")
 		return
 	}
@@ -71,7 +70,7 @@ func (s *Server) handleGetBoss(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleClaim(w http.ResponseWriter, r *http.Request) {
 	var req claimRequest
-	if err := decodeJSON(w, r, &req); err != nil {
+	if err := decodeJSON(r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid JSON body")
 		return
 	}
@@ -84,12 +83,8 @@ func (s *Server) handleClaim(w http.ResponseWriter, r *http.Request) {
 		s.writeDomainError(w, err)
 		return
 	}
-	// A fresh claim is 201; an idempotent replay is 200.
-	code := http.StatusCreated
-	if res.AlreadyClaimed {
-		code = http.StatusOK
-	}
-	writeJSON(w, code, res)
+	// Always 200: idempotent; the already_claimed flag distinguishes replays.
+	writeJSON(w, http.StatusOK, res)
 }
 
 func (s *Server) handleHealthz(w http.ResponseWriter, _ *http.Request) {
@@ -123,7 +118,7 @@ func (s *Server) writeDomainError(w http.ResponseWriter, err error) {
 	}
 }
 
-func decodeJSON(_ http.ResponseWriter, r *http.Request, dst any) error {
+func decodeJSON(r *http.Request, dst any) error {
 	dec := json.NewDecoder(r.Body)
 	dec.DisallowUnknownFields()
 	return dec.Decode(dst)

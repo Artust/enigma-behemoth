@@ -1,6 +1,5 @@
-// Package boss holds the domain logic: applying damage, reading boss state, and
-// claiming rewards. It orchestrates the Redis cache, the durable writer, and
-// Postgres, keeping persistence details out of the HTTP layer.
+// Package boss holds the domain logic: apply damage, read boss state, claim
+// rewards, over the Redis cache, durable writer, and Postgres.
 package boss
 
 import (
@@ -24,19 +23,41 @@ var (
 	ErrOverloaded          = errors.New("service overloaded, retry shortly")
 )
 
+// compensateTimeout bounds the detached compensating undo.
+const compensateTimeout = 2 * time.Second
+
+// Reconciler schedules an out-of-band cache rebuild for a boss that may have
+// diverged from Postgres. A nil reconciler leaves the cache TTL as the backstop.
+type Reconciler interface {
+	Enqueue(bossID string)
+}
+
 // Service is the domain entry point.
 type Service struct {
-	redis  *store.RedisStore
-	pg     *store.PostgresStore
-	writer *store.Writer
-	rehydr *recovery.Rehydrator
-	maxHit int64
-	log    *slog.Logger
+	redis      *store.RedisStore
+	pg         *store.PostgresStore
+	writer     *store.Writer
+	rehydr     *recovery.Rehydrator
+	maxHit     int64
+	log        *slog.Logger
+	reconciler Reconciler
+}
+
+// Option customizes a Service.
+type Option func(*Service)
+
+// WithReconciler wires a background cache reconciler.
+func WithReconciler(rc Reconciler) Option {
+	return func(s *Service) { s.reconciler = rc }
 }
 
 // New builds the domain service.
-func New(r *store.RedisStore, pg *store.PostgresStore, w *store.Writer, rh *recovery.Rehydrator, maxHit int64, log *slog.Logger) *Service {
-	return &Service{redis: r, pg: pg, writer: w, rehydr: rh, maxHit: maxHit, log: log}
+func New(r *store.RedisStore, pg *store.PostgresStore, w *store.Writer, rh *recovery.Rehydrator, maxHit int64, log *slog.Logger, opts ...Option) *Service {
+	s := &Service{redis: r, pg: pg, writer: w, rehydr: rh, maxHit: maxHit, log: log}
+	for _, opt := range opts {
+		opt(s)
+	}
+	return s
 }
 
 // DamageResult is returned by Damage.
@@ -66,28 +87,10 @@ func (s *Service) Damage(ctx context.Context, bossID, playerID string, amount in
 	case store.StatusDefeated:
 		return DamageResult{}, ErrBossAlreadyDefeated
 	case store.StatusApplied:
-		// Redis has recorded the applied damage; now make it durable.
 		if err := s.writer.Submit(ctx, store.DamageEvent{
 			BossID: bossID, PlayerID: playerID, Applied: res.Applied,
 		}); err != nil {
-			if errors.Is(err, store.ErrQueueFull) {
-				// The event never entered the writer's intake, so it will never be
-				// committed to Postgres — yet Redis already applied it. Undo the
-				// Redis-side effect so the cache does not diverge from durable state
-				// (otherwise a "defeated" boss in Redis could become permanently
-				// unclaimable, since Claim gates on Postgres). Only ErrQueueFull is
-				// safe to compensate: on a ctx-cancel the event may still be in the
-				// channel and will commit, so we must NOT undo there. Use a detached
-				// context so the undo completes even if the client has disconnected.
-				cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Second)
-				defer cancel()
-				if cerr := s.redis.CompensateDamage(cctx, bossID, playerID, res.Applied); cerr != nil {
-					s.log.Error("compensating undo failed; redis may diverge from postgres until rehydrate",
-						"boss", bossID, "player", playerID, "applied", res.Applied, "err", cerr)
-				}
-				return DamageResult{}, ErrOverloaded
-			}
-			return DamageResult{}, err
+			return DamageResult{}, s.reconcileFailedWrite(ctx, bossID, playerID, res.Applied, err)
 		}
 		return DamageResult{
 			BossID: bossID, PlayerID: playerID,
@@ -98,8 +101,41 @@ func (s *Service) Damage(ctx context.Context, bossID, playerID string, amount in
 	}
 }
 
-// applyWithRehydrate runs the Redis script; on a cold cache (StatusNotLoaded)
-// it lazily rehydrates the boss from Postgres and retries once.
+// reconcileFailedWrite keeps the cache consistent after a durable write fails and
+// maps the failure to a domain error. Redis already applied the hit; on a definite
+// non-persist (queue full / commit failed) undo it, on a ctx cancel it may still
+// commit so reconcile instead.
+func (s *Service) reconcileFailedWrite(ctx context.Context, bossID, playerID string, applied int64, err error) error {
+	switch {
+	case errors.Is(err, store.ErrQueueFull), errors.Is(err, store.ErrCommitFailed):
+		cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), compensateTimeout)
+		defer cancel()
+		if cerr := s.redis.CompensateDamage(cctx, bossID, playerID, applied); cerr != nil {
+			s.log.Error("compensating undo failed; scheduling background reconcile",
+				"boss", bossID, "player", playerID, "applied", applied, "err", cerr)
+			s.scheduleReconcile(bossID)
+		}
+		if errors.Is(err, store.ErrQueueFull) {
+			return ErrOverloaded
+		}
+		return err
+	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
+		s.scheduleReconcile(bossID)
+		return err
+	default:
+		return err
+	}
+}
+
+// scheduleReconcile fires a best-effort background rebuild, if configured.
+func (s *Service) scheduleReconcile(bossID string) {
+	if s.reconciler != nil {
+		s.reconciler.Enqueue(bossID)
+	}
+}
+
+// applyWithRehydrate runs the Redis script; on a cold cache it rehydrates the
+// boss from Postgres and retries once.
 func (s *Service) applyWithRehydrate(ctx context.Context, bossID, playerID string, amount int64) (store.ApplyResult, error) {
 	res, err := s.redis.ApplyDamage(ctx, bossID, playerID, amount)
 	if err != nil {
@@ -108,7 +144,6 @@ func (s *Service) applyWithRehydrate(ctx context.Context, bossID, playerID strin
 	if res.Status != store.StatusNotLoaded {
 		return res, nil
 	}
-	// Cold cache: rehydrate from durable state, then retry once.
 	exists, err := s.rehydr.RehydrateBoss(ctx, bossID)
 	if err != nil {
 		return res, err

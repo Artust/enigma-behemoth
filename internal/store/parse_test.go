@@ -5,11 +5,7 @@ import (
 	"testing"
 )
 
-// TestToInt64 covers the tolerant coercion of a Redis/Lua reply element to
-// int64. This is load-bearing: it parses the {status, applied, newhp} the damage
-// script returns, so a wrong coercion would corrupt HP or the applied amount.
-// go-redis may deliver integers as int64 (common) but the helper also tolerates
-// int and float64; anything unexpected must be 0, never a panic.
+// TestToInt64: tolerant coercion of a Redis/Lua reply element; unexpected types give 0, no panic.
 func TestToInt64(t *testing.T) {
 	cases := []struct {
 		name string
@@ -34,9 +30,7 @@ func TestToInt64(t *testing.T) {
 	}
 }
 
-// TestDecodePayload covers turning a stored reward JSONB blob back into the map
-// returned in the claim response. Empty/nil input and malformed JSON must yield
-// nil (a safe, omittable response field) rather than panic.
+// TestDecodePayload: reward JSONB blob to map; empty/nil/malformed yield nil, no panic.
 func TestDecodePayload(t *testing.T) {
 	t.Run("valid object", func(t *testing.T) {
 		got := decodePayload([]byte(`{"gold":100,"items":["Common Chest"]}`))
@@ -64,7 +58,7 @@ func TestDecodePayload(t *testing.T) {
 		}
 	})
 	t.Run("non-object JSON", func(t *testing.T) {
-		// A JSON array cannot unmarshal into map[string]any => nil.
+		// JSON array cannot unmarshal into map[string]any, so nil.
 		if got := decodePayload([]byte(`[1,2,3]`)); got != nil {
 			t.Errorf("decodePayload(array) = %#v, want nil", got)
 		}

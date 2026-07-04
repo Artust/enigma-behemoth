@@ -8,22 +8,23 @@ import (
 	"time"
 )
 
-// Config holds all tunables for the service. Everything is overridable via env
-// so the same binary runs unchanged in docker-compose and locally.
+// Config holds all tunables, each overridable via env.
 type Config struct {
 	HTTPAddr        string
 	PostgresDSN     string
 	RedisAddr       string
 	RedisPassword   string
-	MaxDamagePerHit int64 // reject a single /damage above this (anti-abuse / overflow guard)
+	RedisCacheTTL   time.Duration
+	ReconcileDelay  time.Duration
+	MaxDamagePerHit int64
 
 	// Group-commit durable writer tuning.
-	WriterQueueSize   int           // bounded channel capacity; full => 503 fast-fail
-	WriterConcurrency int           // parallel committer goroutines (sharded group-commit)
-	BatchMaxSize      int           // flush when this many events are buffered
-	BatchMaxWait      time.Duration // ...or when this much time elapses, whichever first
-	BatchTxTimeout    time.Duration // per-batch DB transaction timeout
-	PGMaxConns        int           // Postgres pool size (>= WriterConcurrency + read headroom)
+	WriterQueueSize   int
+	WriterConcurrency int
+	BatchMaxSize      int
+	BatchMaxWait      time.Duration
+	BatchTxTimeout    time.Duration
+	PGMaxConns        int
 
 	ShutdownTimeout time.Duration
 }
@@ -35,6 +36,8 @@ func Load() (Config, error) {
 		PostgresDSN:       env("POSTGRES_DSN", "postgres://behemoth:behemoth@localhost:5432/behemoth?sslmode=disable"),
 		RedisAddr:         env("REDIS_ADDR", "localhost:6379"),
 		RedisPassword:     env("REDIS_PASSWORD", ""),
+		RedisCacheTTL:     envDuration("REDIS_CACHE_TTL", 60*time.Second),
+		ReconcileDelay:    envDuration("RECONCILE_DELAY", 3*time.Second),
 		MaxDamagePerHit:   envInt64("MAX_DAMAGE_PER_HIT", 1_000_000_000),
 		WriterQueueSize:   envInt("WRITER_QUEUE_SIZE", 20_000),
 		WriterConcurrency: envInt("WRITER_CONCURRENCY", 8),

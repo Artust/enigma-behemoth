@@ -33,7 +33,7 @@ func run(log *slog.Logger) error {
 		return err
 	}
 
-	// Bound startup dependency dialing so we fail fast if infra is unavailable.
+	// Bound startup dialing so we fail fast if infra is down.
 	dialCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
@@ -43,7 +43,8 @@ func run(log *slog.Logger) error {
 	}
 	defer pg.Close()
 
-	rdb, err := store.NewRedisStore(dialCtx, cfg.RedisAddr, cfg.RedisPassword)
+	rdb, err := store.NewRedisStore(dialCtx, cfg.RedisAddr, cfg.RedisPassword,
+		store.WithCacheTTL(cfg.RedisCacheTTL))
 	if err != nil {
 		return err
 	}
@@ -59,9 +60,12 @@ func run(log *slog.Logger) error {
 	writer.Start()
 
 	rehydr := recovery.New(rdb, pg, log)
-	svc := boss.New(rdb, pg, writer, rehydr, cfg.MaxDamagePerHit, log)
+	reconciler := recovery.NewReconciler(rehydr, cfg.ReconcileDelay, log)
+	reconciler.Start()
+	svc := boss.New(rdb, pg, writer, rehydr, cfg.MaxDamagePerHit, log,
+		boss.WithReconciler(reconciler))
 
-	// Rehydrate the cache from durable state BEFORE serving traffic.
+	// Rehydrate the cache from durable state before serving traffic.
 	var ready atomic.Bool
 	if err := rehydr.RehydrateAll(dialCtx); err != nil {
 		return err
@@ -76,7 +80,6 @@ func run(log *slog.Logger) error {
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 
-	// Serve until a signal arrives.
 	errCh := make(chan error, 1)
 	go func() {
 		log.Info("listening", "addr", cfg.HTTPAddr)
@@ -95,9 +98,7 @@ func run(log *slog.Logger) error {
 		log.Info("shutdown signal received")
 	}
 
-	// Graceful shutdown: stop accepting, let in-flight handlers finish (they may
-	// be blocked on the writer), THEN flush the writer so no acked-but-unwritten
-	// events remain, then close datastores.
+	// Drain HTTP handlers first (they may block on the writer), then flush the writer.
 	ready.Store(false)
 	shutCtx, shutCancel := context.WithTimeout(context.Background(), cfg.ShutdownTimeout)
 	defer shutCancel()
@@ -105,6 +106,7 @@ func run(log *slog.Logger) error {
 		log.Error("http shutdown", "err", err)
 	}
 	writer.Stop()
+	reconciler.Stop()
 	log.Info("shutdown complete")
 	return nil
 }

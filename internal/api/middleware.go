@@ -18,8 +18,7 @@ func observe(log *slog.Logger, m *Metrics) func(http.Handler) http.Handler {
 			next.ServeHTTP(ww, r)
 			elapsed := time.Since(start)
 
-			// Prefer the chi route pattern (e.g. "/boss/{id}") to keep metric
-			// label cardinality bounded rather than the raw path.
+			// Route pattern, not raw path, to bound label cardinality.
 			route := r.URL.Path
 			if pat := chi.RouteContext(r.Context()).RoutePattern(); pat != "" {
 				route = pat

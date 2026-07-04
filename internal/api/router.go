@@ -9,13 +9,12 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
-// Router builds the HTTP handler with middleware and routes.
 func (s *Server) Router() http.Handler {
 	r := chi.NewRouter()
 
 	r.Use(middleware.Recoverer)
 	r.Use(observe(s.log, s.metrics))
-	// Cap request handling time so a slow dependency can't pin a connection.
+	// Cap handling time so a slow dependency can't pin a connection.
 	r.Use(middleware.Timeout(10 * time.Second))
 
 	r.Post("/damage", s.handleDamage)

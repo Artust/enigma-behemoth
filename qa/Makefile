@@ -10,7 +10,7 @@ POSTGRES_DSN ?= postgres://behemoth:behemoth@localhost:15432/behemoth?sslmode=di
 BASE_URL     ?= http://localhost:18080
 export BASE_URL
 
-.PHONY: help up down wait seed integration durability perf-damage perf-mixed perf-overload perf all
+.PHONY: help up down wait seed integration durability perf-damage perf-mixed perf-overload perf soak bench all
 
 help: ## list targets
 	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN{FS=":.*?## "}{printf "  %-16s %s\n",$$1,$$2}'
@@ -55,5 +55,13 @@ perf-overload: ## LAYER 3 — overload -> fast 503 backpressure (starves writer,
 	@$(MAKE) --no-print-directory wait
 
 perf: perf-damage perf-mixed ## run the core perf suite
+
+soak: ## LAYER 3 (H) — endurance/leak soak (SOAK_DUR, SOAK_QPS overridable)
+	./perf/soak.sh
+
+bench: ## backing measurements for ARCHITECT.md (hot-row baseline, Lua latency, claim race)
+	./bench/pg_single_row.sh
+	./bench/redis_lua.sh
+	./bench/claim_race.sh
 
 all: up seed integration durability perf ## full run: stack -> correctness -> durability -> perf

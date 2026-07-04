@@ -11,9 +11,8 @@ import (
 	"behemoth/internal/store"
 )
 
-// TestWriter_Durability submits many concurrent events and asserts they are all
-// durably committed (audit log + aggregate) once every Submit returns — the
-// core "200 means durable" contract of the group-commit writer.
+// TestWriter_Durability: once every Submit returns, all events are durably
+// committed (audit log + aggregate) - the "200 means durable" contract.
 func TestWriter_Durability(t *testing.T) {
 	requireEnv(t)
 	ctx := context.Background()
@@ -45,7 +44,7 @@ func TestWriter_Durability(t *testing.T) {
 		}(i)
 	}
 	wg.Wait()
-	w.Stop() // flush + ack any tail
+	w.Stop() // flush + ack tail
 
 	for i, e := range errs {
 		if e != nil {
@@ -73,9 +72,8 @@ func TestWriter_Durability(t *testing.T) {
 	}
 }
 
-// TestWriter_FailFastWhenQueueFull proves the bounded intake sheds load rather
-// than blocking: once the buffer is saturated, Submit returns ErrQueueFull
-// immediately (mapped to HTTP 503 upstream).
+// TestWriter_FailFastWhenQueueFull: a saturated buffer makes Submit return
+// ErrQueueFull immediately (mapped to HTTP 503) instead of blocking.
 func TestWriter_FailFastWhenQueueFull(t *testing.T) {
 	requireEnv(t)
 	ctx := context.Background()
@@ -86,15 +84,15 @@ func TestWriter_FailFastWhenQueueFull(t *testing.T) {
 	t.Cleanup(pg.Close)
 
 	const queueSize = 2
-	// Deliberately DO NOT Start the writer, so nothing drains the channel.
+	// Not started, so nothing drains the channel.
 	w := store.NewWriter(pg, store.WriterConfig{
 		QueueSize: queueSize, MaxBatch: 100, MaxWait: time.Second, TxTimeout: time.Second, Concurrency: 1,
 	}, testLogger())
 
 	blockCtx, cancel := context.WithCancel(context.Background())
-	defer cancel() // release the blocked submitters at test end
+	defer cancel() // release blocked submitters at test end
 
-	// Fill the buffer with blocked submitters (they enqueue, then wait on done).
+	// Fill the buffer with blocked submitters.
 	for i := 0; i < queueSize; i++ {
 		go func() {
 			_ = w.Submit(blockCtx, store.DamageEvent{BossID: "x", PlayerID: "p", Applied: 1})
@@ -108,9 +106,8 @@ func TestWriter_FailFastWhenQueueFull(t *testing.T) {
 	}
 }
 
-// TestWriter_NoHangOnCommitError proves a failing commit never leaves a handler
-// hung: submitting an event for a non-existent boss triggers a FK violation, and
-// the deferred waiter-release surfaces the error to Submit within a bound.
+// TestWriter_NoHangOnCommitError: a failing commit (FK violation on a ghost boss)
+// surfaces the error to Submit within a bound instead of hanging the handler.
 func TestWriter_NoHangOnCommitError(t *testing.T) {
 	requireEnv(t)
 	ctx := context.Background()
@@ -126,7 +123,7 @@ func TestWriter_NoHangOnCommitError(t *testing.T) {
 	w.Start()
 	t.Cleanup(w.Stop)
 
-	// boss id is never inserted => CommitBatch fails the FK on damage_events.
+	// boss id never inserted => CommitBatch fails the FK.
 	ev := store.DamageEvent{BossID: uniqueID("ghost"), PlayerID: "p", Applied: 1}
 
 	done := make(chan error, 1)
@@ -137,6 +134,6 @@ func TestWriter_NoHangOnCommitError(t *testing.T) {
 			t.Fatal("Submit returned nil, want the commit error propagated")
 		}
 	case <-time.After(10 * time.Second):
-		t.Fatal("Submit hung — a failed commit must release its waiter")
+		t.Fatal("Submit hung: a failed commit must release its waiter")
 	}
 }

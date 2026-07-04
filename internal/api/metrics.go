@@ -13,7 +13,7 @@ type Metrics struct {
 }
 
 // NewMetrics registers and returns the service metrics. Duration buckets are
-// tuned around the 100ms p99 target for the damage endpoint.
+// tuned around the 100ms p99 target.
 func NewMetrics() *Metrics {
 	return &Metrics{
 		Requests: promauto.NewCounterVec(prometheus.CounterOpts{

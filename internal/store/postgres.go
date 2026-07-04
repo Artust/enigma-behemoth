@@ -15,8 +15,7 @@ type PostgresStore struct {
 	pool *pgxpool.Pool
 }
 
-// NewPostgresStore opens a connection pool and verifies connectivity. maxConns
-// must cover the parallel committers plus headroom for reads (claims/recovery).
+// NewPostgresStore opens a connection pool and verifies connectivity.
 func NewPostgresStore(ctx context.Context, dsn string, maxConns int32) (*PostgresStore, error) {
 	cfg, err := pgxpool.ParseConfig(dsn)
 	if err != nil {
@@ -61,8 +60,7 @@ func (p *PostgresStore) ListBossIDs(ctx context.Context) ([]string, error) {
 }
 
 // RecoveryState returns the durable state used to rehydrate Redis. Current HP is
-// DERIVED from contributions (max_hp - SUM) so it is invariant to how many
-// service instances have written, and never trusts a possibly-stale cache.
+// derived (max_hp - SUM contributions), never read from a possibly-stale cache.
 func (p *PostgresStore) RecoveryState(ctx context.Context, bossID string) (RecoveryState, bool, error) {
 	var rs RecoveryState
 	err := p.pool.QueryRow(ctx, `
@@ -101,15 +99,14 @@ func (p *PostgresStore) Contributions(ctx context.Context, bossID string) ([]Lea
 	return out, rows.Err()
 }
 
-// CommitBatch durably persists a batch of applied-damage events in ONE
-// transaction (one fsync amortized across the batch): append the audit log,
-// upsert per-player aggregates, and decrement boss HP / mark defeat.
+// CommitBatch persists a batch of applied-damage events in one transaction:
+// append the audit log, upsert per-player aggregates, and decrement boss HP.
 func (p *PostgresStore) CommitBatch(ctx context.Context, events []DamageEvent) error {
 	if len(events) == 0 {
 		return nil
 	}
 
-	// Aggregate in-memory to minimize row touches under load.
+	// Aggregate per key to cut row touches.
 	type key struct{ boss, player string }
 	perPlayer := make(map[key]int64)
 	perBoss := make(map[string]int64)
@@ -118,10 +115,7 @@ func (p *PostgresStore) CommitBatch(ctx context.Context, events []DamageEvent) e
 		perBoss[e.BossID] += e.Applied
 	}
 
-	// Acquire row locks in a deterministic order across ALL concurrent
-	// committers to avoid deadlocks (Go map iteration order is random, so two
-	// batches touching the same rows could otherwise lock them in opposite
-	// orders). Sort contributions by (boss, player) and bosses by id.
+	// Stable lock order across committers to avoid deadlocks (map order is random).
 	playerKeys := make([]key, 0, len(perPlayer))
 	for k := range perPlayer {
 		playerKeys = append(playerKeys, k)
@@ -142,9 +136,9 @@ func (p *PostgresStore) CommitBatch(ctx context.Context, events []DamageEvent) e
 	if err != nil {
 		return fmt.Errorf("begin batch tx: %w", err)
 	}
-	defer tx.Rollback(ctx) // no-op after commit
+	defer tx.Rollback(ctx)
 
-	// 1. Append audit log via COPY (fast path for many rows).
+	// Audit log via COPY.
 	rows := make([][]any, 0, len(events))
 	for _, e := range events {
 		rows = append(rows, []any{e.BossID, e.PlayerID, e.Applied})
@@ -157,7 +151,7 @@ func (p *PostgresStore) CommitBatch(ctx context.Context, events []DamageEvent) e
 		return fmt.Errorf("copy damage_events: %w", err)
 	}
 
-	// 2. Upsert aggregates + 3. update boss HP/state in a single pipelined batch.
+	// Aggregates + HP/state in one pipelined batch.
 	b := &pgx.Batch{}
 	for _, k := range playerKeys {
 		b.Queue(`
@@ -178,7 +172,7 @@ func (p *PostgresStore) CommitBatch(ctx context.Context, events []DamageEvent) e
 			boss, perBoss[boss])
 	}
 	br := tx.SendBatch(ctx, b)
-	for i := 0; i < b.Len(); i++ {
+	for range b.Len() {
 		if _, err := br.Exec(); err != nil {
 			br.Close()
 			return fmt.Errorf("batch exec: %w", err)
@@ -195,14 +189,13 @@ func (p *PostgresStore) CommitBatch(ctx context.Context, events []DamageEvent) e
 }
 
 // ClaimBasis reads the durable data needed to authorize/price a reward claim.
-// Claims gate on Postgres state (never Redis) so a claim can only proceed once
-// the killing blow is durably committed and contributions are final.
+// Gates on Postgres, never Redis, so a claim needs a durably committed kill.
 func (p *PostgresStore) ClaimBasis(ctx context.Context, bossID, playerID string) (ClaimBasis, error) {
 	var cb ClaimBasis
 	err := p.pool.QueryRow(ctx,
 		`SELECT max_hp, state FROM bosses WHERE id = $1`, bossID).Scan(&cb.MaxHP, &cb.State)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return cb, nil // Exists=false
+		return cb, nil
 	}
 	if err != nil {
 		return cb, err
@@ -213,7 +206,7 @@ func (p *PostgresStore) ClaimBasis(ctx context.Context, bossID, playerID string)
 		`SELECT total_damage FROM contributions WHERE boss_id = $1 AND player_id = $2`,
 		bossID, playerID).Scan(&cb.TotalDamage)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return cb, nil // HasContribution=false
+		return cb, nil
 	}
 	if err != nil {
 		return cb, err
@@ -222,10 +215,8 @@ func (p *PostgresStore) ClaimBasis(ctx context.Context, bossID, playerID string)
 	return cb, nil
 }
 
-// SaveClaim persists a claim exactly once. On first call it inserts and returns
-// the fresh record; on any duplicate it returns the existing record with
-// AlreadyClaimed=true. The unique PK (boss_id, player_id) enforces exactly-once
-// even under concurrent duplicate requests.
+// SaveClaim persists a claim exactly once: first call inserts, duplicates return
+// the existing record with AlreadyClaimed=true (enforced by the PK).
 func (p *PostgresStore) SaveClaim(ctx context.Context, in ClaimInput) (ClaimResult, error) {
 	res := ClaimResult{BossID: in.BossID, PlayerID: in.PlayerID}
 	tx, err := p.pool.Begin(ctx)
@@ -252,7 +243,7 @@ func (p *PostgresStore) SaveClaim(ctx context.Context, in ClaimInput) (ClaimResu
 	case err == nil:
 		claimed = true
 	case errors.Is(err, pgx.ErrNoRows):
-		// Conflict: a claim already exists — read it back for an idempotent reply.
+		// Already claimed: read it back for an idempotent reply.
 		if err := tx.QueryRow(ctx, `
 			SELECT tier, damage_pct, reward_payload, claimed_at
 			FROM reward_claims WHERE boss_id = $1 AND player_id = $2`,

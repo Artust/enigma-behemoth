@@ -1,12 +1,10 @@
 //go:build integration
 
-// Package integration holds correctness/integration tests that exercise the
-// real store, recovery and Lua layers against a live Redis + Postgres.
+// Package integration holds integration tests against a live Redis + Postgres.
 //
-// They are gated behind the `integration` build tag AND the presence of the
-// REDIS_ADDR / POSTGRES_DSN env vars, so a plain `go test ./...` (as another
-// session may run) never picks them up. Every test uses a unique boss/player id
-// and cleans up after itself, so it is safe to run against a shared database.
+// Gated behind the `integration` build tag and the REDIS_ADDR / POSTGRES_DSN env
+// vars. Each test uses a unique boss/player id and cleans up, so it is safe
+// against a shared database.
 //
 //	REDIS_ADDR=localhost:16379 \
 //	POSTGRES_DSN=postgres://behemoth:behemoth@localhost:15432/behemoth?sslmode=disable \
@@ -24,6 +22,8 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/redis/go-redis/v9"
+
+	"behemoth/internal/store"
 )
 
 var (
@@ -32,8 +32,7 @@ var (
 	enabled   bool
 )
 
-// pgMaxConns is the pool size used by store.PostgresStore in these tests. Kept
-// small but > the concurrency any single test drives.
+// pgMaxConns is the pool size for store.PostgresStore in these tests.
 const pgMaxConns int32 = 10
 
 func TestMain(m *testing.M) {
@@ -42,7 +41,7 @@ func TestMain(m *testing.M) {
 	enabled = redisAddr != "" && pgDSN != ""
 	if !enabled {
 		fmt.Fprintln(os.Stderr,
-			"[qa/integration] REDIS_ADDR and POSTGRES_DSN not set — skipping integration tests")
+			"[qa/integration] REDIS_ADDR and POSTGRES_DSN not set - skipping integration tests")
 	}
 	os.Exit(m.Run())
 }
@@ -60,14 +59,34 @@ func testLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
 }
 
-// uniqueID returns an id unique to this run so tests never collide with each
-// other, with re-runs, or with a parallel session's data.
+// uniqueID returns an id unique to this run to avoid collisions.
 func uniqueID(prefix string) string {
 	return fmt.Sprintf("qa-%s-%d", prefix, time.Now().UnixNano())
 }
 
-// newPool opens a raw pgx pool for setup/teardown/assertions (the store package
-// intentionally hides its pool, so tests own one for direct SQL).
+// openPG opens a live store.PostgresStore with test cleanup registered.
+func openPG(t *testing.T) *store.PostgresStore {
+	t.Helper()
+	pg, err := store.NewPostgresStore(context.Background(), pgDSN, pgMaxConns)
+	if err != nil {
+		t.Fatalf("postgres store: %v", err)
+	}
+	t.Cleanup(pg.Close)
+	return pg
+}
+
+// openRedis opens a live store.RedisStore with test cleanup registered.
+func openRedis(t *testing.T) *store.RedisStore {
+	t.Helper()
+	rdb, err := store.NewRedisStore(context.Background(), redisAddr, "")
+	if err != nil {
+		t.Fatalf("redis store: %v", err)
+	}
+	t.Cleanup(func() { _ = rdb.Close() })
+	return rdb
+}
+
+// newPool opens a raw pgx pool for setup/teardown/assertions via direct SQL.
 func newPool(t *testing.T) *pgxpool.Pool {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)

@@ -41,11 +41,7 @@ func TestLoadOverrides(t *testing.T) {
 	}
 }
 
-// TestLoadRejectsInvalid asserts Load surfaces a validation error for values
-// that would silently break the service: a non-positive damage cap (which would
-// reject or overflow every hit) or a zero-sized queue/batch (a writer that can
-// never make progress). These are guards Load() promises, not implementation
-// details of the caller.
+// TestLoadRejectsInvalid: Load returns a validation error for a bad damage cap or zero queue/batch.
 func TestLoadRejectsInvalid(t *testing.T) {
 	cases := []struct {
 		name string
@@ -67,9 +63,7 @@ func TestLoadRejectsInvalid(t *testing.T) {
 	}
 }
 
-// TestLoadMalformedEnvFallsBackToDefault asserts a garbage env value does not
-// crash or zero-out a tunable: the parser must fall back to the documented
-// default (so a typo in one var can never silently disable batching, etc.).
+// TestLoadMalformedEnvFallsBackToDefault: garbage env values fall back to defaults, not zero.
 func TestLoadMalformedEnvFallsBackToDefault(t *testing.T) {
 	t.Setenv("BATCH_MAX_WAIT", "not-a-duration")
 	t.Setenv("WRITER_QUEUE_SIZE", "not-an-int")

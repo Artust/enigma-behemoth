@@ -1,13 +1,10 @@
-// Command loadprobe is a dependency-free load generator for POST /damage.
-// It measures throughput and latency percentiles, and asserts p99 < 100ms.
-//
-// Use it when k6 is not installed:
+// Command loadprobe is a dependency-free load generator for POST /damage that
+// reports throughput and latency percentiles and asserts p99 < 100ms.
 //
 //	go run ./scripts/loadprobe
 //	BASE_URL=http://localhost:8080 BOSS_ID=boss-1 go run ./scripts/loadprobe
 //
-// Note: it drains and reuses HTTP keep-alive connections — measuring the server,
-// not TCP connection setup.
+// Drains and reuses keep-alive connections, measuring the server not setup.
 package main
 
 import (

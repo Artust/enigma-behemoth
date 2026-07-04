@@ -1,7 +1,6 @@
 package boss
 
-// Reward tiers are a pure function of the player's damage contribution
-// percentage. Thresholds are inclusive lower bounds.
+// Reward tiers, keyed off the player's damage contribution percentage.
 const (
 	TierLegendary = "legendary"
 	TierEpic      = "epic"
@@ -10,7 +9,8 @@ const (
 	TierCommon    = "common"
 )
 
-// TierFor maps a contribution percentage (0-100) to a reward tier.
+// TierFor maps a contribution percentage (0-100) to a reward tier. Thresholds
+// are inclusive lower bounds.
 func TierFor(pct float64) string {
 	switch {
 	case pct >= 20:
@@ -26,8 +26,8 @@ func TierFor(pct float64) string {
 	}
 }
 
-// RewardFor returns the reward payload granted for a tier. This is materialized
-// into the claim row (outbox-style) so "granting" the reward is a durable read.
+// RewardFor returns the reward payload granted for a tier. It is stored in the
+// claim row so granting the reward is a durable write.
 func RewardFor(tier string) map[string]any {
 	switch tier {
 	case TierLegendary:

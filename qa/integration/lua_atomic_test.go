@@ -11,12 +11,8 @@ import (
 	"behemoth/internal/store"
 )
 
-// TestLuaAtomic_NoLostUpdate_NoNegativeHP hammers one boss from many goroutines
-// and asserts the core concurrency-safety invariants of the Redis Lua path:
-//   - HP never goes negative,
-//   - the sum of all applied damage equals max_hp exactly when the boss dies
-//     (no lost updates, no over-application — the reward denominator is 100%),
-//   - the boss ends up 'defeated' with 0 HP.
+// TestLuaAtomic_NoLostUpdate_NoNegativeHP: under concurrent hits the Lua path keeps
+// HP non-negative, sum(applied) == max_hp exactly, and ends 'defeated' at 0 HP.
 func TestLuaAtomic_NoLostUpdate_NoNegativeHP(t *testing.T) {
 	requireEnv(t)
 	ctx := context.Background()
@@ -31,7 +27,7 @@ func TestLuaAtomic_NoLostUpdate_NoNegativeHP(t *testing.T) {
 	t.Cleanup(func() { delRedisBoss(t, bossID) })
 
 	const maxHP = 100_000
-	// Seed the cache directly — no Postgres needed for pure-Lua correctness.
+	// Seed the cache directly; no Postgres needed here.
 	if err := rs.Rehydrate(ctx, bossID,
 		store.RecoveryState{MaxHP: maxHP, CurrentHP: maxHP, State: "alive"}, nil); err != nil {
 		t.Fatalf("seed redis: %v", err)
@@ -48,7 +44,7 @@ func TestLuaAtomic_NoLostUpdate_NoNegativeHP(t *testing.T) {
 		wg.Add(1)
 		go func(g int) {
 			defer wg.Done()
-			player := uniqueID("p") // distinct players
+			player := uniqueID("p")
 			for i := 0; i < hitsEach; i++ {
 				res, err := rs.ApplyDamage(ctx, bossID, player, dmg)
 				if err != nil {
@@ -62,7 +58,7 @@ func TestLuaAtomic_NoLostUpdate_NoNegativeHP(t *testing.T) {
 					}
 					atomic.AddInt64(&totalApplied, res.Applied)
 				case store.StatusDefeated:
-					// boss already at 0 — a valid outcome once it dies
+					// already at 0, valid once dead
 				default:
 					t.Errorf("unexpected status %d", res.Status)
 				}
@@ -99,8 +95,7 @@ func TestLuaAtomic_GuardsAndColdCache(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = rs.Close() })
 
-	// Cold cache: a boss not loaded in Redis reports StatusNotLoaded so the
-	// caller knows to rehydrate — never treated as HP 0.
+	// Cold cache: unloaded boss reports StatusNotLoaded, not HP 0.
 	missing := uniqueID("cold")
 	res, err := rs.ApplyDamage(ctx, missing, "p", 10)
 	if err != nil {
@@ -110,8 +105,7 @@ func TestLuaAtomic_GuardsAndColdCache(t *testing.T) {
 		t.Fatalf("cold boss status = %d, want StatusNotLoaded(%d)", res.Status, store.StatusNotLoaded)
 	}
 
-	// Non-positive damage is rejected inside Lua even for a loaded boss, so a
-	// bad value can never revive a boss.
+	// Non-positive damage rejected inside Lua, can't revive a boss.
 	bossID := uniqueID("guard")
 	t.Cleanup(func() { delRedisBoss(t, bossID) })
 	if err := rs.Rehydrate(ctx, bossID,

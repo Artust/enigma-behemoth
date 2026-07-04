@@ -11,20 +11,15 @@ import (
 	"behemoth/internal/store"
 )
 
-// newClaimService builds a boss.Service wired with only Postgres. Claim gates on
-// and prices from the durable store exclusively (never Redis/writer), so the
-// cache, writer and rehydrator are intentionally nil here — if Claim ever
-// touched them this test would panic, which is itself a useful guard.
+// newClaimService: Postgres-only Service. cache, writer, rehydrator are nil on
+// purpose: a touch panics, proving Claim reads only Postgres.
 func newClaimService(t *testing.T, pg *store.PostgresStore) *boss.Service {
 	t.Helper()
 	return boss.New(nil, pg, nil, nil, 1_000_000_000, testLogger())
 }
 
-// TestClaimService_TierFromContribution is the requirement-level check that
-// "reward tier depends on the % of damage contributed": it drives the full
-// Service.Claim path (durable gating + pricing) and asserts each contribution
-// percentage yields the correct tier and matching reward payload. The existing
-// SaveClaim race test hardcodes a tier, so this closes that gap.
+// TestClaimService_TierFromContribution: each contribution % yields the correct
+// reward tier and matching payload through the full Claim path.
 func TestClaimService_TierFromContribution(t *testing.T) {
 	requireEnv(t)
 	ctx := context.Background()
@@ -73,15 +68,15 @@ func TestClaimService_TierFromContribution(t *testing.T) {
 			if res.AlreadyClaimed {
 				t.Fatalf("first claim reported AlreadyClaimed=true")
 			}
-			// Reward payload must be the one owed for the computed tier.
+			// Reward payload must match the computed tier.
 			wantGold := boss.RewardFor(c.wantTier)["gold"]
 			gotGold := res.Payload["gold"]
-			// JSONB round-trips ints as float64; compare numerically.
+			// JSONB decodes ints as float64; compare numerically.
 			if toF(gotGold) != toF(wantGold) {
 				t.Fatalf("reward gold = %v, want %v for tier %q", gotGold, wantGold, c.wantTier)
 			}
 
-			// Second claim by the same player is idempotent: same tier, flagged.
+			// Second claim is idempotent: same tier, flagged.
 			res2, err := svc.Claim(ctx, bossID, player)
 			if err != nil {
 				t.Fatalf("second Claim: %v", err)
@@ -96,9 +91,8 @@ func TestClaimService_TierFromContribution(t *testing.T) {
 	}
 }
 
-// TestClaimService_Gating asserts the domain error mapping the API relies on:
-// unknown boss, alive boss, and non-contributor each produce the specific
-// sentinel error (which the HTTP layer turns into 404 / 409 / 403).
+// TestClaimService_Gating: unknown boss, alive boss, and non-contributor each
+// produce their sentinel error (mapped to 404 / 409 / 403).
 func TestClaimService_Gating(t *testing.T) {
 	requireEnv(t)
 	ctx := context.Background()

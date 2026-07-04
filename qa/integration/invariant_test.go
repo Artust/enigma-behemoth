@@ -10,11 +10,7 @@ import (
 	"behemoth/internal/store"
 )
 
-// TestDurableInvariant_AndRehydrate asserts the persistence-safety invariants
-// that survive a restart:
-//   - derived HP == max_hp - SUM(contributions) (RecoveryState is authoritative),
-//   - after rehydrating the cache from Postgres, Redis exactly mirrors the
-//     durable state (HP + leaderboard).
+// TestDurableInvariant_AndRehydrate: HP invariant survives restart; rehydrated cache mirrors Postgres.
 func TestDurableInvariant_AndRehydrate(t *testing.T) {
 	requireEnv(t)
 	ctx := context.Background()
@@ -31,7 +27,7 @@ func TestDurableInvariant_AndRehydrate(t *testing.T) {
 	}
 	t.Cleanup(pg.Close)
 
-	// Persist a set of applied hits the same way the writer would.
+	// Persist applied hits the way the writer would.
 	events := []store.DamageEvent{
 		{BossID: bossID, PlayerID: "a", Applied: 100},
 		{BossID: bossID, PlayerID: "b", Applied: 250},
@@ -50,7 +46,7 @@ func TestDurableInvariant_AndRehydrate(t *testing.T) {
 		t.Fatalf("derived CurrentHP = %d, want max_hp-SUM = %d", rs.CurrentHP, want)
 	}
 
-	// bosses.current_hp (updated inside CommitBatch) must match the derived value.
+	// bosses.current_hp must match the derived value.
 	var storedHP int64
 	if err := pool.QueryRow(ctx,
 		`SELECT current_hp FROM bosses WHERE id = $1`, bossID).Scan(&storedHP); err != nil {
@@ -60,7 +56,7 @@ func TestDurableInvariant_AndRehydrate(t *testing.T) {
 		t.Fatalf("bosses.current_hp=%d != derived=%d", storedHP, rs.CurrentHP)
 	}
 
-	// Rehydrate the cache from durable state and confirm Redis mirrors Postgres.
+	// Rehydrate cache and confirm Redis mirrors Postgres.
 	redisStore, err := store.NewRedisStore(ctx, redisAddr, "")
 	if err != nil {
 		t.Fatalf("redis store: %v", err)
@@ -79,7 +75,7 @@ func TestDurableInvariant_AndRehydrate(t *testing.T) {
 	if view.HP != rs.CurrentHP {
 		t.Fatalf("cache HP=%d != durable HP=%d", view.HP, rs.CurrentHP)
 	}
-	// Leaderboard rebuilt from contributions: b=250 (rank 1), a=150 (rank 2).
+	// Leaderboard rebuilt from contributions: b=250 rank 1, a=150 rank 2.
 	if len(view.Leaderboard) < 2 {
 		t.Fatalf("leaderboard has %d entries, want >= 2", len(view.Leaderboard))
 	}

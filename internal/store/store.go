@@ -7,21 +7,23 @@ import (
 	"time"
 )
 
-// Sentinel errors surfaced to the domain/service layer.
 var (
 	// ErrBossNotFound means the boss id does not exist in Postgres.
 	ErrBossNotFound = errors.New("boss not found")
-	// ErrQueueFull means the durable writer's bounded queue is saturated;
-	// the caller should fail fast (HTTP 503) rather than block.
+	// ErrQueueFull means the durable writer's queue is saturated; fail fast (503).
 	ErrQueueFull = errors.New("durable write queue full")
+	// ErrCommitFailed marks a group-commit failure: the event did not persist and
+	// won't be retried, so the caller may safely compensate. Distinct from a ctx
+	// cancel, which may still commit.
+	ErrCommitFailed = errors.New("durable commit failed")
 )
 
 // Apply status codes returned by the Redis damage Lua script.
 const (
 	StatusApplied   = 1  // damage landed
 	StatusDefeated  = 0  // boss already at 0 HP
-	StatusNotLoaded = -1 // boss state absent from Redis; caller must rehydrate
-	StatusInvalid   = -2 // damage <= 0 (defense-in-depth guard)
+	StatusNotLoaded = -1 // boss absent from Redis; caller must rehydrate
+	StatusInvalid   = -2 // damage <= 0
 )
 
 // DamageEvent is a single durable unit handed to the group-commit writer.
@@ -56,8 +58,9 @@ type BossView struct {
 
 // RecoveryState is the durable state used to rehydrate Redis on startup.
 type RecoveryState struct {
-	MaxHP     int64
-	CurrentHP int64 // derived: max_hp - SUM(contributions), floored at 0
+	MaxHP int64
+	// CurrentHP is derived: max_hp - SUM(contributions), floored at 0.
+	CurrentHP int64
 	State     string
 }
 
@@ -79,8 +82,7 @@ type ClaimInput struct {
 	Payload  []byte
 }
 
-// ClaimResult is the persisted claim (either freshly inserted or the existing
-// idempotent record).
+// ClaimResult is the persisted claim, freshly inserted or the existing record.
 type ClaimResult struct {
 	BossID         string         `json:"boss_id"`
 	PlayerID       string         `json:"player_id"`
