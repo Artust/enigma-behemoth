@@ -1,0 +1,48 @@
+# Binaries & build output
+/bin/
+/build/
+/dist/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+/server
+/loadprobe
+
+# Test & coverage output
+*.test
+*.out
+coverage.*
+profile.*
+
+# Go workspace
+go.work
+go.work.sum
+
+# Dependency vendor dir (bỏ nếu không dùng vendoring)
+/vendor/
+
+# k6 / load-test output
+*.json.gz
+summary.json
+
+# Env & secrets
+.env
+.env.*
+*.local
+
+# Editor / IDE
+.idea/
+.vscode/
+*.swp
+*~
+
+# OS junk
+.DS_Store
+Thumbs.db
+
+# Logs & temp
+*.log
+tmp/
+/tmp/

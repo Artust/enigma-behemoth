@@ -1,0 +1,61 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: behemoth
+      POSTGRES_PASSWORD: behemoth
+      POSTGRES_DB: behemoth
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./db/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U behemoth -d behemoth"]
+      interval: 3s
+      timeout: 3s
+      retries: 10
+    ports:
+      - "5432:5432"
+
+  redis:
+    image: redis:7-alpine
+    # appendonly + everysec = durable backstop; noeviction so hot boss keys are
+    # never silently evicted under memory pressure.
+    command: ["redis-server", "--appendonly", "yes", "--appendfsync", "everysec", "--maxmemory-policy", "noeviction"]
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      timeout: 3s
+      retries: 10
+    ports:
+      - "6379:6379"
+
+  app:
+    build: .
+    environment:
+      HTTP_ADDR: ":8080"
+      POSTGRES_DSN: "postgres://behemoth:behemoth@postgres:5432/behemoth?sslmode=disable"
+      REDIS_ADDR: "redis:6379"
+      MAX_DAMAGE_PER_HIT: "1000000000"
+      BATCH_MAX_SIZE: "500"
+      BATCH_MAX_WAIT: "10ms"
+      WRITER_QUEUE_SIZE: "20000"
+      WRITER_CONCURRENCY: "8"
+      PG_MAX_CONNS: "20"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    ports:
+      - "8080:8080"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8080/healthz"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+volumes:
+  pgdata:
+  redisdata:
